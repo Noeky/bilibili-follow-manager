@@ -5,10 +5,8 @@ import json
 import time
 import os
 import sys
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from webdriver_manager.chrome import ChromeDriverManager
+import requests
+import qrcode
 from typing import Dict, Optional
 
 def get_app_dir():
@@ -23,83 +21,119 @@ def get_app_dir():
 class BilibiliAutoLogin:
     
     def __init__(self):
-        self.driver: Optional[webdriver.Chrome] = None
+        self.session = requests.Session()
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://www.bilibili.com/"
+        }
     
-    def setup_driver(self):
-        chrome_options = Options()
-        chrome_options.add_argument('--no-sandbox')
-        chrome_options.add_argument('--disable-dev-shm-usage')
-        chrome_options.add_argument('--disable-gpu')
-        chrome_options.add_argument('--disable-extensions')
-        chrome_options.add_argument('--disable-images')
-        chrome_options.add_argument('--log-level=3')
-        chrome_options.add_argument('--silent')
-        chrome_options.add_argument('--disable-blink-features=AutomationControlled')
-        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        chrome_options.add_experimental_option('useAutomationExtension', False)
-        chrome_options.add_argument('--window-size=1280,720')
-        service = Service(ChromeDriverManager().install())
-        self.driver = webdriver.Chrome(service=service, options=chrome_options)
-        self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+    def get_qrcode(self):
+        """获取登录二维码URL和key"""
+        url = "https://passport.bilibili.com/x/passport-login/web/qrcode/generate"
+        try:
+            resp = self.session.get(url, headers=self.headers).json()
+            if resp['code'] == 0:
+                return resp['data']['url'], resp['data']['qrcode_key']
+        except Exception as e:
+            print(f"获取二维码失败: {e}")
+        return None, None
+
+    def check_qrcode(self, qrcode_key):
+        """检查二维码扫描状态"""
+        url = "https://passport.bilibili.com/x/passport-login/web/qrcode/poll"
+        params = {"qrcode_key": qrcode_key}
+        try:
+            resp = self.session.get(url, params=params, headers=self.headers).json()
+            return resp
+        except Exception:
+            return None
 
     def manual_login_bilibili(self) -> Optional[Dict]:
+        """执行扫码登录流程"""
         try:
-            self.setup_driver()
-            print("正在打开B站登录页面...")
-            if self.driver != None:
-                self.driver.get("https://passport.bilibili.com/login")
+            print("正在获取登录二维码...")
+            url, qrcode_key = self.get_qrcode()
+            if not url:
+                print("无法获取二维码URL")
+                return None
             
-            print("请在浏览器中手动登录，程序将自动检测登录状态...")
+            # 生成二维码图片
+            try:
+                qr = qrcode.QRCode(version=1, box_size=10, border=5)
+                qr.add_data(url)
+                qr.make(fit=True)
+                img = qr.make_image(fill_color="black", back_color="white")
+                
+                # 保存并打开图片
+                img_path = os.path.join(get_app_dir(), 'login_qrcode.png')
+                with open(img_path, "wb") as f:
+                    img.save(f)
+                print(f"二维码已生成: {img_path}")
+                
+                # 尝试自动打开图片
+                try:
+                    if sys.platform.startswith('win'):
+                        os.startfile(img_path)
+                    elif sys.platform == 'darwin':
+                        os.system(f'open "{img_path}"')
+                    else:
+                        os.system(f'xdg-open "{img_path}"')
+                except Exception as e:
+                    print(f"无法自动打开图片，请手动打开: {e}")
+                    
+            except ImportError:
+                print("错误: 缺少必要库。请运行: pip install qrcode Pillow")
+                print(f"或者手动打开此链接生成二维码: {url}")
+                return None
             
-            max_wait_time = 300
+            print("请扫描二维码登录 (二维码有效期约3分钟)...")
+            
+            # 轮询状态
+            max_wait_time = 180
             start_time = time.time()
             
             while time.time() - start_time < max_wait_time:
-                try:
-                    if self.driver != None:
-                        current_url = self.driver.current_url
-                    
-                    if any([
-                        "www.bilibili.com" in current_url and "passport" not in current_url,
-                        "space.bilibili.com" in current_url,
-                        "member.bilibili.com" in current_url
-                    ]):
-                        print("登录成功！正在获取凭据...")
-                        break
-                        
-                    time.sleep(2)
-                except Exception:
+                data = self.check_qrcode(qrcode_key)
+                if not data:
                     time.sleep(2)
                     continue
+                
+                code = data['data']['code']
+                
+                if code == 0: # 登录成功
+                    print("登录成功！正在保存凭据...")
+                    # 清理图片
+                    try:
+                        if os.path.exists(img_path):
+                            os.remove(img_path)
+                    except:
+                        pass
+                    
+                    # 提取 Cookies
+                    cookies = requests.utils.dict_from_cookiejar(self.session.cookies)
+                    
+                    if 'SESSDATA' in cookies and 'bili_jct' in cookies:
+                        return cookies
+                    else:
+                        # 如果自动获取不到，可能需要处理 data.url
+                        # 但通常 requests session 会自动处理 Set-Cookie
+                        return cookies
+                        
+                elif code == 86038: # 二维码失效
+                    print("二维码已失效，请重试")
+                    break
+                
+                time.sleep(2)
+                
             else:
                 print("登录超时")
                 return None
-            
-            if self.driver != None:
-                cookies = self.driver.get_cookies()
-            cookie_dict = {}
-            
-            for cookie in cookies:
-                if cookie['name'] in ['SESSDATA', 'bili_jct', 'DedeUserID', 'DedeUserID__ckMd5']:
-                    cookie_dict[cookie['name']] = cookie['value']
-            
-            if 'SESSDATA' in cookie_dict and 'bili_jct' in cookie_dict:
-                return cookie_dict
-            else:
-                print("获取凭据失败")
-                return None
                 
         except Exception as e:
-            print(f"登录失败: {e}")
+            print(f"登录过程出错: {e}")
             return None
             
-        finally:
-            if self.driver:
-                try:
-                    time.sleep(2)
-                    self.driver.quit()
-                except:
-                    pass
+        return None
 
     def create_config_file(self, cookies: Dict) -> bool:
         try:
@@ -110,7 +144,7 @@ class BilibiliAutoLogin:
                     "DedeUserID": ""
                 },
                 "headers": {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                     "Referer": "https://www.bilibili.com/"
                 },
                 "settings": {
@@ -126,7 +160,10 @@ class BilibiliAutoLogin:
             config_template["cookies"]["bili_jct"] = cookies.get("bili_jct", "")
             config_template["cookies"]["DedeUserID"] = cookies.get("DedeUserID", "")
             
-            config_file_path = os.path.join(get_app_dir(), 'config.json')
+            # 确保保存到正确的位置
+            app_dir = get_app_dir()
+            config_file_path = os.path.join(app_dir, 'config.json')
+            
             with open(config_file_path, 'w', encoding='utf-8') as f:
                 json.dump(config_template, f, indent=2, ensure_ascii=False)
             
@@ -137,16 +174,22 @@ class BilibiliAutoLogin:
             return False
 
 def auto_login_setup() -> bool:
-    print("程序将打开B站登录页面，请手动登录")
+    print("程序将生成登录二维码，请使用B站App扫描...")
     
     login_tool = BilibiliAutoLogin()
     cookies = login_tool.manual_login_bilibili()
     
     if cookies and login_tool.create_config_file(cookies):
-        print("登录成功！")
         return True
     else:
-        print("登录失败")
+        print("登录失败或取消")
+        # 清理可能残留的图片
+        try:
+            img_path = os.path.join(get_app_dir(), 'login_qrcode.png')
+            if os.path.exists(img_path):
+                os.remove(img_path)
+        except:
+            pass
         return False
 
 if __name__ == "__main__":

@@ -969,7 +969,7 @@ class BilibiliManagerGUI:
     def show_about(self):
         """显示关于对话框"""
         about_text = """
-B站关注管理器 v1.0
+B站关注管理器 v1.1
 Bilibili Follow Manager
 
 🎬 现代化的B站关注管理工具

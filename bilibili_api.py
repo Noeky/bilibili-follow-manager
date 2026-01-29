@@ -215,11 +215,16 @@ class BilibiliAPI:
             
             if result['code'] == 0:
                 return True
+            elif result['code'] == -352:
+                self.logger.error(f"取消关注失败: 触发风控校验 (-352)，请稍后重试")
+                raise Exception("RISK_CONTROL_352")
             else:
                 self.logger.error(f"取消关注失败 (用户ID: {fid}): {result['message']}")
                 return False
                 
         except Exception as e:
+            if str(e) == "RISK_CONTROL_352":
+                raise e
             self.logger.error(f"取消关注异常 (用户ID: {fid}): {e}")
             return False
     
@@ -260,6 +265,7 @@ class BilibiliAPI:
         
         success_count = 0
         failed_count = 0
+        risk_control_triggered = False
         delay = self.config['settings']['delay_between_requests']
         
         # 测试模式下减少延迟
@@ -267,30 +273,45 @@ class BilibiliAPI:
             delay = min(delay, 0.2)
         
         for i, user in enumerate(all_following, 1):
+            if risk_control_triggered:
+                break
+                
             fid = user['mid']
             uname = user['uname']
             
             self.logger.info(f"[{i}/{total_count}] 正在取消关注: {uname} (ID: {fid})")
             
-            if self.unfollow_user(fid):
-                success_count += 1
-                self.logger.info(f"✓ 成功取消关注: {uname}")
-            else:
-                failed_count += 1
-                self.logger.error(f"✗ 取消关注失败: {uname}")
+            try:
+                if self.unfollow_user(fid):
+                    success_count += 1
+                    self.logger.info(f"✓ 成功取消关注: {uname}")
+                else:
+                    failed_count += 1
+                    self.logger.error(f"✗ 取消关注失败: {uname}")
+            except Exception as e:
+                if str(e) == "RISK_CONTROL_352":
+                    self.logger.error("检测到风控限制 (-352)，停止后续操作。请等待几小时后再试，或在网页端手动验证。")
+                    failed_count += 1
+                    risk_control_triggered = True
+                else:
+                    failed_count += 1
             
             # 延迟以避免请求过快
-            if i < total_count:
+            if i < total_count and not risk_control_triggered:
                 time.sleep(delay)
         
         result = {
             'total': total_count,
             'success': success_count,
             'failed': failed_count,
-            'test_mode': is_test_mode
+            'test_mode': is_test_mode,
+            'risk_control': risk_control_triggered
         }
         
-        self.logger.info(f"批量取消关注完成! 总计: {total_count}, 成功: {success_count}, 失败: {failed_count}")
+        if risk_control_triggered:
+             self.logger.warning(f"批量取消关注因风控中止! 已成功: {success_count}, 失败: {failed_count}")
+        else:
+             self.logger.info(f"批量取消关注完成! 总计: {total_count}, 成功: {success_count}, 失败: {failed_count}")
         return result
     
     def get_user_info(self) -> Dict:
